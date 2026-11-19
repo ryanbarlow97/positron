@@ -287,6 +287,9 @@ export async function registerCreateEnvironmentFeatures(
     // --- Start Positron ---
     pythonRuntimeManager: IPythonRuntimeManager,
 ): Promise<void> {
+    // The listener at the end of this function selects a new environment for its folder, and
+    // nothing awaits a listener. Kept here so python.createEnvironmentAndRegister can wait for it.
+    let selectingCreatedEnvironment: Promise<void> = Promise.resolve();
     // --- End Positron ---
     disposables.push(
         registerCommand(
@@ -402,10 +405,18 @@ export async function registerCreateEnvironmentFeatures(
             const providers = await getRankedProviders();
             return getCreateEnvironmentProviders(providers);
         }),
-        registerCommand(Commands.Create_Environment_And_Register, (options: CreateEnvironmentAndRegisterOptions) => {
-            const providers = _createEnvironmentProviders.getAll();
-            return createEnvironmentAndRegister(providers, pythonRuntimeManager, options);
-        }),
+        registerCommand(
+            Commands.Create_Environment_And_Register,
+            async (options: CreateEnvironmentAndRegisterOptions) => {
+                const providers = _createEnvironmentProviders.getAll();
+                const result = await createEnvironmentAndRegister(providers, pythonRuntimeManager, options);
+                // Resolve only once the new environment is the folder's interpreter. A caller that
+                // reads the active interpreter as soon as this resolves (the welcome page re-running
+                // its health check) would otherwise race the selection and report the old one.
+                await selectingCreatedEnvironment.catch(() => undefined);
+                return result;
+            },
+        ),
         registerCommand(Commands.Is_Conda_Installed, async (): Promise<boolean> => {
             const conda = await Conda.getConda();
             return conda !== undefined;
@@ -544,16 +555,25 @@ export async function registerCreateEnvironmentFeatures(
         // --- Start Positron ---
         registerCreateEnvironmentProvider(new UvCreationProvider(), await isUvInstalled()),
         // --- End Positron ---
-        onCreateEnvironmentExited(async (e: EnvironmentDidCreateEvent) => {
-            if (e.path && e.options?.selectEnvironment) {
-                await pythonPathUpdater.updatePythonPath(
-                    e.path,
-                    ConfigurationTarget.WorkspaceFolder,
-                    'ui',
-                    e.workspaceFolder?.uri,
-                );
-                showInformationMessage(`${CreateEnv.informEnvCreation} ${pathUtils.getDisplayName(e.path)}`);
-            }
+        // --- Start Positron ---
+        // Keep the selection's promise so python.createEnvironmentAndRegister can wait for it.
+        // onCreateEnvironmentExited(async (e: EnvironmentDidCreateEvent) => {
+        onCreateEnvironmentExited((e: EnvironmentDidCreateEvent) => {
+            selectingCreatedEnvironment = (async () => {
+                // --- End Positron ---
+                if (e.path && e.options?.selectEnvironment) {
+                    await pythonPathUpdater.updatePythonPath(
+                        e.path,
+                        ConfigurationTarget.WorkspaceFolder,
+                        'ui',
+                        e.workspaceFolder?.uri,
+                    );
+                    showInformationMessage(`${CreateEnv.informEnvCreation} ${pathUtils.getDisplayName(e.path)}`);
+                }
+                // --- Start Positron ---
+            })();
+            return selectingCreatedEnvironment;
+            // --- End Positron ---
         }),
     );
 }

@@ -51,6 +51,10 @@ import * as globalEnvironment from '../../../client/pythonEnvironments/common/en
 import * as uv from '../../../client/pythonEnvironments/common/environmentManagers/uv';
 import { UV_PROVIDER_ID } from '../../../client/pythonEnvironments/creation/provider/uvCreationProvider';
 import { CONDA_PROVIDER_ID } from '../../../client/pythonEnvironments/creation/provider/condaCreationProvider';
+import {
+    VenvCreationProvider,
+    VenvCreationProviderId,
+} from '../../../client/pythonEnvironments/creation/provider/venvCreationProvider';
 import { CreateEnvironmentOptionsInternal } from '../../../client/pythonEnvironments/creation/types';
 import * as createEnvironment from '../../../client/pythonEnvironments/creation/createEnvironment';
 import { reusedEnvironmentResult } from '../../../client/pythonEnvironments/creation/reusedEnvironment';
@@ -552,6 +556,51 @@ suite('Create Environment APIs', () => {
             await runCommand();
 
             pythonRuntimeManager.verifyAll();
+        });
+    });
+
+    suite('Create Environment and register', () => {
+        const venvPython = '/project/.venv/bin/python';
+        const folder = { uri: Uri.file('/project'), name: 'project', index: 0 };
+
+        test('resolves only after the new environment is selected for the folder', async () => {
+            sinon.stub(workspaceApis, 'getWorkspaceFolders').returns([folder]);
+            sinon
+                .stub(VenvCreationProvider.prototype, 'createEnvironment')
+                .resolves({ path: venvPython, workspaceFolder: folder });
+
+            // Selecting the environment is slower than everything else the command does.
+            let finishSelecting!: () => void;
+            const selecting = new Promise<void>((resolve) => {
+                finishSelecting = resolve;
+            });
+            interpreterPathService
+                .setup((p) =>
+                    p.updatePythonPath(venvPython, ConfigurationTarget.WorkspaceFolder, 'ui', typemoq.It.isAny()),
+                )
+                .returns(() => selecting);
+
+            const call = registerCommandStub
+                .getCalls()
+                .find((c) => c.args[0] === Commands.Create_Environment_And_Register);
+            assert.ok(call, 'python.createEnvironmentAndRegister was not registered');
+            let resolved = false;
+            const command = call!.args[1]({
+                providerId: VenvCreationProviderId,
+                interpreterPath: '/usr/bin/python',
+            }).then(() => {
+                resolved = true;
+            });
+
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            const resolvedBeforeSelection = resolved;
+            finishSelecting();
+            await command;
+
+            assert.deepStrictEqual(
+                { resolvedBeforeSelection, resolved },
+                { resolvedBeforeSelection: false, resolved: true },
+            );
         });
     });
 
